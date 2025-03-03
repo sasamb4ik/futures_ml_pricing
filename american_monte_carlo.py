@@ -45,60 +45,38 @@ class PricerAmericanMonteCarlo(PricerAbstract):
         self.sampler.sample()
         if not quiet:
             self.sampler.plot(cnt=10, plot_mean=True, y="payoff, discount_factor, markov_state")
-        
-        # Вычисление дисконтированного payoff
+    
+    # Вычисление дисконтированного payoff
         discounted_payoff = self.sampler.payoff * self.sampler.discount_factor
-        
-        # Инициализация option_price как payoff в последний момент времени
+    
+    # Инициализация option_price как payoff в последний момент времени
         self.option_price = discounted_payoff[:, -1].copy()
         weights = [None] * self.sampler.cnt_times
         self.price_history = [None] * (self.sampler.cnt_times - 1) + [self.option_price.mean()]
 
-        # Вычисление upper_bound (максимальный payoff по траекториям)
+    # Вычисление upper_bound
         upper_bound = np.zeros(self.sampler.cnt_times)
         for i in range(self.sampler.cnt_times):
             upper_bound[i] = discounted_payoff[:, i:].max(axis=1).mean()
 
         bar = tqdm(range(self.sampler.cnt_times - 2, -1, -1))
         for time_index in bar:
-            if time_index == 0:
-                # Для time_index == 0 выполняем регрессию на всех траекториях
-                features = self.sampler.markov_state[:, time_index]
-                transformed = self.basis_functions_transformer.fit_transform(features)
-                regularization = np.eye(transformed.shape[1], dtype=float) * self.regularization_alpha
-                inv = np.linalg.pinv((transformed.T @ transformed + regularization), rcond=1e-4)
-                weights[time_index] = inv @ transformed.T @ self.option_price
-                continuation_value = transformed @ weights[time_index]
-                in_the_money_indices = np.arange(self.sampler.cnt_trajectories, dtype=int)
-            else:
-                in_the_money_indices = np.where(discounted_payoff[:, time_index] > 1e-9)[0]
-                if (len(in_the_money_indices) / self.sampler.cnt_trajectories < 1e-3 or
-                        len(in_the_money_indices) < 2 or (test and weights[time_index] is None)):
-                    # Если мало in-the-money траекторий, используем веса с предыдущего шага
-                    if time_index < self.sampler.cnt_times - 1 and weights[time_index + 1] is not None:
-                        features = self.sampler.markov_state[:, time_index]
-                        transformed = self.basis_functions_transformer.fit_transform(features)
-                        continuation_value = transformed @ weights[time_index + 1]
-                    else:
-                        continuation_value = np.ones(self.sampler.cnt_trajectories) * np.mean(self.option_price)
-                else:
-                    features = self.sampler.markov_state[in_the_money_indices, time_index]
-                    transformed = self.basis_functions_transformer.fit_transform(features)
-                    if not test:
-                        regularization = np.eye(transformed.shape[1], dtype=float) * self.regularization_alpha
-                        inv = np.linalg.pinv((transformed.T @ transformed + regularization), rcond=1e-4)
-                        weights[time_index] = inv @ transformed.T @ self.option_price[in_the_money_indices]
-                    continuation_value = transformed @ weights[time_index]
+        # Вычисление продолжительной стоимости на всех траекториях
+            features = self.sampler.markov_state[:, time_index]
+            transformed = self.basis_functions_transformer.fit_transform(features)
+            regularization = np.eye(transformed.shape[1], dtype=float) * self.regularization_alpha
+            inv = np.linalg.pinv((transformed.T @ transformed + regularization), rcond=1e-4)
+            weights[time_index] = inv @ transformed.T @ self.option_price
+            continuation_value = transformed @ weights[time_index]
 
-            # Обновление option_price для in_the_money_indices
-            indicator = discounted_payoff[in_the_money_indices, time_index] > continuation_value.reshape(-1)
-            self.option_price[in_the_money_indices] = \
-                (indicator * discounted_payoff[in_the_money_indices, time_index].copy() +
-                 ~indicator * self.option_price[in_the_money_indices])
-            
-            # Обновление price_history
+        # Обновление option_price для всех траекторий
+            indicator = discounted_payoff[:, time_index] > continuation_value
+            self.option_price = (indicator * discounted_payoff[:, time_index] +
+                            ~indicator * self.option_price)
+        
+        # Обновление price_history
             self.price_history[time_index] = self.option_price.mean()
-            
+        
             if not quiet and time_index % 10 == 0:
                 _plot_progress(self.sampler, bar, self.price_history, self.price_history, upper_bound)
 
@@ -109,7 +87,7 @@ class PricerAmericanMonteCarlo(PricerAbstract):
         self.result[key] = {
             "price": float(self.option_price.mean()),
             "upper_bound": float(discounted_payoff.max(axis=1).mean()),
-            "lower_bound": float(self.price_history[0]),  # Нижняя оценка как цена в t=0
+            "lower_bound": float(self.price_history[0]),
             "std": float(self.option_price.std())
         }
 
